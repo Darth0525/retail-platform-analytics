@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# dbt
+target/
+dbt_packages/
+logs/
+profiles.yml
+
+# Data (never push raw data)
+data/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

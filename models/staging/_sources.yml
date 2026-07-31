@@ -1,0 +1,229 @@
+# version: 2 tells dbt which syntax rulebook to use when parsing this file.
+# dbt's YAML format has evolved across versions — this header prevents
+# parsing errors and suppresses dbt warnings. Always required in schema files.
+version: 2
+
+# _sources.yml
+# ------------
+# Registers the raw Olist tables as dbt sources. This tells dbt:
+#   - Where the raw data lives (database, schema, table names)
+#   - What each table and column means (documentation)
+#
+# In staging models, raw tables are always referenced via source() — never
+# hardcoded schema.table names. Example:
+#   {{ source('olist', 'orders') }} → RETAIL_ANALYTICS.RAW.ORDERS
+#
+# The leading underscore in _sources.yml is convention — it makes the file
+# sort to the top of the folder so it's easy to find.
+
+sources:
+  - name: olist                          # the source name used in source() calls
+    description: >
+      Raw Olist Brazilian E-Commerce data loaded from Kaggle CSVs into the
+      RAW schema. Contains ~100k orders placed between 2016 and 2018 across
+      multiple sellers and product categories on the Olist marketplace.
+    database: RETAIL_ANALYTICS            # Snowflake database
+    schema: RAW                           # Snowflake schema
+
+    tables:
+
+      # -----------------------------------------------------------------------
+      - name: orders
+        description: >
+          One row per order. The central table of the dataset — all other
+          tables join back to this via order_id. Contains order status and
+          all key timestamps across the order lifecycle.
+        columns:
+          - name: ORDER_ID
+            description: Unique identifier for each order. Primary key.
+          - name: CUSTOMER_ID
+            description: >
+              Foreign key to the customers table. Note this is not the
+              customer's unique identity — one customer can have multiple
+              order_ids each with a different customer_id. See customer_unique_id
+              in the customers table for true customer identity.
+          - name: ORDER_STATUS
+            description: >
+              Current status of the order. Values: delivered, shipped,
+              canceled, unavailable, invoiced, processing, created, approved.
+          - name: ORDER_PURCHASE_TIMESTAMP
+            description: Timestamp when the customer placed the order. Never null.
+          - name: ORDER_APPROVED_AT
+            description: Timestamp when payment was approved. Can be null for orders canceled before approval.
+          - name: ORDER_DELIVERED_CARRIER_DATE
+            description: Timestamp when the order was handed to the logistics carrier. Can be null for unshipped orders.
+          - name: ORDER_DELIVERED_CUSTOMER_DATE
+            description: Timestamp when the customer received the order. Can be null for undelivered orders.
+          - name: ORDER_ESTIMATED_DELIVERY_DATE
+            description: >
+              Estimated delivery date shown to the customer at purchase time.
+              Always set, used to calculate whether delivery was on time.
+
+      # -----------------------------------------------------------------------
+      - name: order_items
+        description: >
+          One row per item within an order. An order can contain multiple
+          items from different sellers. Joins to orders via order_id,
+          to products via product_id, and to sellers via seller_id.
+        columns:
+          - name: ORDER_ID
+            description: Foreign key to the orders table.
+          - name: ORDER_ITEM_ID
+            description: >
+              Sequential number of the item within the order (1, 2, 3...).
+              Combined with order_id forms the primary key.
+          - name: PRODUCT_ID
+            description: Foreign key to the products table.
+          - name: SELLER_ID
+            description: Foreign key to the sellers table.
+          - name: SHIPPING_LIMIT_DATE
+            description: Deadline by which the seller must hand the item to the carrier.
+          - name: PRICE
+            description: Item price in Brazilian Reais (BRL). Does not include freight.
+          - name: FREIGHT_VALUE
+            description: >
+              Freight cost in BRL for this item. When an order has multiple
+              items, freight is split across them.
+
+      # -----------------------------------------------------------------------
+      - name: order_payments
+        description: >
+          One row per payment method used on an order. An order can have
+          multiple payment rows if the customer split payment across methods
+          (e.g. credit card + voucher).
+        columns:
+          - name: ORDER_ID
+            description: Foreign key to the orders table.
+          - name: PAYMENT_SEQUENTIAL
+            description: >
+              Order of payment methods used (1 = primary). Combined with
+              order_id forms the primary key.
+          - name: PAYMENT_TYPE
+            description: >
+              Payment method. Values: credit_card, boleto, voucher, debit_card.
+              Boleto is a Brazilian bank slip payment method.
+          - name: PAYMENT_INSTALLMENTS
+            description: >
+              Number of installments the customer chose for credit card payments.
+              1 = paid in full. Common in Brazil to split purchases into monthly payments.
+          - name: PAYMENT_VALUE
+            description: Value of this payment in BRL.
+
+      # -----------------------------------------------------------------------
+      - name: order_reviews
+        description: >
+          Customer satisfaction reviews submitted after delivery. One row per
+          review. Most customers only submit a score — comment fields are
+          commonly null.
+        columns:
+          - name: REVIEW_ID
+            description: >
+              Identifier for the review. NOT guaranteed unique — source data contains
+              duplicate review_ids across different orders. True primary key is the
+              composite of review_id + order_id.
+          - name: ORDER_ID
+            description: Foreign key to the orders table.
+          - name: REVIEW_SCORE
+            description: Customer satisfaction score from 1 (worst) to 5 (best).
+          - name: REVIEW_COMMENT_TITLE
+            description: Optional short title for the review. Commonly null as most customers only submit a score.
+          - name: REVIEW_COMMENT_MESSAGE
+            description: Optional free-text review message. Commonly null as most customers only submit a score.
+          - name: REVIEW_CREATION_DATE
+            description: Timestamp when the review survey was sent to the customer.
+          - name: REVIEW_ANSWER_TIMESTAMP
+            description: Timestamp when the customer submitted the review.
+
+      # -----------------------------------------------------------------------
+      - name: customers
+        description: >
+          One row per order-customer combination. Note: a single real customer
+          who places multiple orders will appear multiple times with different
+          customer_ids but the same customer_unique_id. Use customer_unique_id
+          for counting distinct real customers.
+        columns:
+          - name: CUSTOMER_ID
+            description: >
+              Unique identifier per order — not per real customer. Primary key.
+              Joins to orders.customer_id.
+          - name: CUSTOMER_UNIQUE_ID
+            description: >
+              True unique identifier per real customer across all their orders.
+              Use this to count distinct customers or analyze repeat purchase behavior.
+          - name: CUSTOMER_ZIP_CODE_PREFIX
+            description: First 5 digits of the customer's zip code.
+          - name: CUSTOMER_CITY
+            description: Customer's city name.
+          - name: CUSTOMER_STATE
+            description: Customer's 2-letter Brazilian state code (e.g. SP, RJ, MG).
+
+      # -----------------------------------------------------------------------
+      - name: sellers
+        description: >
+          One row per seller registered on the Olist marketplace.
+          Joins to order_items via seller_id.
+        columns:
+          - name: SELLER_ID
+            description: Unique identifier for each seller. Primary key.
+          - name: SELLER_ZIP_CODE_PREFIX
+            description: First 5 digits of the seller's zip code.
+          - name: SELLER_CITY
+            description: Seller's city name.
+          - name: SELLER_STATE
+            description: Seller's 2-letter Brazilian state code.
+
+      # -----------------------------------------------------------------------
+      - name: products
+        description: >
+          One row per product listed on Olist. Contains product category,
+          physical dimensions, and weight. Some products have incomplete
+          category or dimension data.
+        columns:
+          - name: PRODUCT_ID
+            description: Unique identifier for each product. Primary key.
+          - name: PRODUCT_CATEGORY_NAME
+            description: Product category in Portuguese. Can be null for products with incomplete data. Joins to product_category_name_translation for English names.
+          - name: PRODUCT_NAME_LENGHT
+            description: Number of characters in the product name. Note — typo in source data (should be LENGTH).
+          - name: PRODUCT_DESCRIPTION_LENGHT
+            description: Number of characters in the product description. Note — typo in source data (should be LENGTH).
+          - name: PRODUCT_PHOTOS_QTY
+            description: Number of product photos published.
+          - name: PRODUCT_WEIGHT_G
+            description: Product weight in grams. Can be null for products with incomplete data.
+          - name: PRODUCT_LENGTH_CM
+            description: Product length in centimetres. Can be null for products with incomplete data.
+          - name: PRODUCT_HEIGHT_CM
+            description: Product height in centimetres. Can be null for products with incomplete data.
+          - name: PRODUCT_WIDTH_CM
+            description: Product width in centimetres. Can be null for products with incomplete data.
+
+      # -----------------------------------------------------------------------
+      - name: geolocation
+        description: >
+          Mapping of Brazilian zip code prefixes to latitude, longitude, city,
+          and state. One zip code can have multiple rows with slightly different
+          lat/lng coordinates — take the average or first value when joining.
+          Largest table at 1,000,163 rows.
+        columns:
+          - name: GEOLOCATION_ZIP_CODE_PREFIX
+            description: 5-digit zip code prefix. Not unique — one prefix can have multiple coordinate entries.
+          - name: GEOLOCATION_LAT
+            description: Latitude coordinate for this zip code prefix.
+          - name: GEOLOCATION_LNG
+            description: Longitude coordinate for this zip code prefix.
+          - name: GEOLOCATION_CITY
+            description: City name for this zip code prefix.
+          - name: GEOLOCATION_STATE
+            description: 2-letter Brazilian state code.
+
+      # -----------------------------------------------------------------------
+      - name: product_category_name_translation
+        description: >
+          Lookup table translating Portuguese product category names to English.
+          71 rows covering all categories in the products table.
+        columns:
+          - name: PRODUCT_CATEGORY_NAME
+            description: Product category name in Portuguese. Joins to products.product_category_name.
+          - name: PRODUCT_CATEGORY_NAME_ENGLISH
+            description: Product category name translated to English.

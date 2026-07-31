@@ -1,0 +1,17 @@
+# Copy this file to ~/.dbt/profiles.yml and fill in your Snowflake credentials.
+# DO NOT commit the filled-in version — it is gitignored.
+
+retail_platform:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: SYSADMIN
+      database: RETAIL_ANALYTICS
+      warehouse: COMPUTE_WH
+      schema: RAW
+      threads: 4
+      client_session_keep_alive: false

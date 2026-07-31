@@ -1,0 +1,406 @@
+version: 2
+
+# _marts_models.yml
+# -----------------
+# Documents all marts layer models with column descriptions and data quality tests.
+#
+# Marts layer contains three types of models:
+#   dim_*  — dimension tables, one row per entity (customer, seller, product, zip)
+#   fct_*  — fact tables, one row per business event (order, order item)
+#   mart_* — pre-aggregated summaries answering specific business questions
+#
+# All marts models are materialized as tables (not views) for fast dashboard queries.
+
+models:
+
+  # ---------------------------------------------------------------------------
+  - name: dim_geolocation
+    description: >
+      Dimension table mapping Brazilian zip code prefixes to city and state.
+      One row per zip_code_prefix. Single authoritative location lookup used
+      by dim_customers, dim_sellers, and fct_orders. Derived from
+      int_geolocation_by_zip which deduplicates 1,000,163 raw coordinate
+      entries to 19,015 unique zip codes using MODE() for standardized spelling.
+    columns:
+      - name: zip_code_prefix
+        description: Primary key. 5-digit Brazilian zip code prefix.
+        tests:
+          - unique
+          - not_null
+
+      - name: city
+        description: Most frequent city name for this zip code. Standardized via MODE() across source entries.
+        tests:
+          - not_null
+
+      - name: state
+        description: Most frequent 2-letter Brazilian state code for this zip code.
+        tests:
+          - not_null
+
+  # ---------------------------------------------------------------------------
+  - name: dim_customers
+    description: >
+      One row per real customer. Uses customer_unique_id as primary key —
+      Olist generates a new customer_id per order so customer_unique_id is
+      the true identity across multiple orders. Location reflects the zip
+      code from the customer's most recent order (last known address).
+      96,096 real customers from 99,441 order-customer rows in staging.
+    columns:
+      - name: customer_id
+        description: Primary key. Renamed from customer_unique_id — the true cross-order customer identity.
+        tests:
+          - unique
+          - not_null
+
+      - name: zip_code_prefix
+        description: >
+          Zip code from the customer's most recent order. Represents last known
+          location. 250 customers (0.26%) changed zip across orders — most recent
+          is used as the best available approximation.
+        tests:
+          - not_null
+
+      - name: city
+        description: Customer city, standardized via dim_geolocation. Can be null if zip not found in geolocation.
+
+      - name: state
+        description: Customer 2-letter Brazilian state code, standardized via dim_geolocation. Can be null if zip not found in geolocation.
+
+  # ---------------------------------------------------------------------------
+  - name: dim_sellers
+    description: >
+      One row per seller registered on the Olist marketplace. 3,095 sellers.
+      stg_sellers is already unique on seller_id — no deduplication needed.
+      City and state sourced from dim_geolocation for standardized spelling.
+    columns:
+      - name: seller_id
+        description: Primary key. Unique identifier for each seller.
+        tests:
+          - unique
+          - not_null
+
+      - name: zip_code_prefix
+        description: Seller zip code prefix. Joins to dim_geolocation.
+        tests:
+          - not_null
+
+      - name: city
+        description: Seller city, standardized via dim_geolocation. Can be null if zip not found in geolocation.
+
+      - name: state
+        description: Seller 2-letter Brazilian state code, standardized via dim_geolocation. Can be null if zip not found in geolocation.
+
+  # ---------------------------------------------------------------------------
+  - name: dim_products
+    description: >
+      One row per product listed on Olist. 32,951 products. Adds English
+      category name by joining to stg_product_categories. Physical dimensions
+      (weight, length, height, width) retained for freight cost analysis.
+      Some products have incomplete data — category and dimension columns can be null.
+    columns:
+      - name: product_id
+        description: Primary key. Unique identifier for each product.
+        tests:
+          - unique
+          - not_null
+
+      - name: category_name_portuguese
+        description: Product category in Portuguese as it appears in source. Can be null for products with incomplete data.
+
+      - name: category_name
+        description: Product category translated to English. Null if category_name_portuguese is null. Use this for reporting.
+
+      - name: product_name_length
+        description: Number of characters in the product name. Can be null for products with incomplete data.
+
+      - name: product_description_length
+        description: Number of characters in the product description. Can be null for products with incomplete data.
+
+      - name: photos_qty
+        description: Number of product photos published. Can be null for products with incomplete data.
+
+      - name: weight_g
+        description: Product weight in grams. Can be null for products with incomplete data.
+
+      - name: length_cm
+        description: Product length in centimetres. Can be null for products with incomplete data.
+
+      - name: height_cm
+        description: Product height in centimetres. Can be null for products with incomplete data.
+
+      - name: width_cm
+        description: Product width in centimetres. Can be null for products with incomplete data.
+
+  # ---------------------------------------------------------------------------
+  - name: fct_orders
+    description: >
+      One row per order. Central fact table joining order details, payment
+      summary, delivery location, and review score. 99,441 orders.
+      Reviews excluded for 1.42% of orders where review-to-order mapping
+      is ambiguous (duplicate review_ids) — review_score is NULL for those.
+    columns:
+      - name: order_id
+        description: Primary key. Unique identifier for each order.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: Foreign key to dim_customers. Uses customer_unique_id for correct cross-order joins.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
+
+      - name: status
+        description: Current lifecycle status of the order.
+        tests:
+          - not_null
+
+      - name: purchased_at
+        description: Timestamp when the customer placed the order.
+        tests:
+          - not_null
+
+      - name: approved_at
+        description: Timestamp when payment was approved. Can be null for orders canceled before approval.
+
+      - name: delivered_to_carrier_at
+        description: Timestamp when order was handed to the carrier. Can be null for unshipped orders.
+
+      - name: delivered_to_customer_at
+        description: Timestamp when customer received the order. Can be null for undelivered orders.
+
+      - name: estimated_delivery_date
+        description: Estimated delivery date shown to customer at purchase time.
+        tests:
+          - not_null
+
+      - name: is_valid_delivery
+        description: >
+          TRUE if delivery sequence is correct (customer received after carrier).
+          FALSE for 23 known dirty rows. NULL if order not yet delivered.
+
+      - name: is_delivered_on_time
+        description: >
+          TRUE if delivered_to_customer_at <= estimated_delivery_date.
+          FALSE if delivered late. NULL if not yet delivered or timestamps missing.
+
+      - name: delivery_time_days
+        description: Days from purchased_at to delivered_to_customer_at. NULL if not yet delivered.
+
+      - name: delivery_zip_code_prefix
+        description: Zip code for this order's delivery address. May differ from customer's last known zip in dim_customers.
+
+      - name: delivery_city
+        description: Delivery city for this order, from dim_geolocation. Can be null if zip not in geolocation.
+
+      - name: delivery_state
+        description: Delivery state for this order, from dim_geolocation. Can be null if zip not in geolocation.
+
+      - name: primary_payment_type
+        description: Payment type with the highest payment value for this order.
+
+      - name: installments
+        description: Max installments across payment rows. Only meaningful for credit_card payments.
+
+      - name: total_payment_value
+        description: Total amount paid in Brazilian Reais (BRL). May be understated for 80 orders with incomplete payment sequences.
+
+      - name: has_payment_value_mismatch
+        description: TRUE if payment total does not match item prices + freight total. 576 orders affected (0.58%).
+
+      - name: review_score
+        description: >
+          Customer satisfaction score from 1 (worst) to 5 (best).
+          NULL if customer did not submit a review, or if review had ambiguous
+          order mapping (is_duplicate_review = TRUE in int_order_reviews).
+
+      - name: is_duplicate_review
+        description: TRUE if the review for this order had ambiguous order mapping in source data. NULL if no review.
+
+  # ---------------------------------------------------------------------------
+  - name: fct_order_items
+    description: >
+      One row per item per order. Composite primary key: order_id + order_item_id.
+      112,650 rows — more than fct_orders because orders can contain multiple items
+      from different sellers. Enriched with product category and seller location.
+    columns:
+      - name: order_id
+        description: Foreign key to fct_orders. Part of composite primary key.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+
+      - name: order_item_id
+        description: Sequential item number within the order (1, 2, 3...). Part of composite primary key.
+        tests:
+          - not_null
+
+      - name: product_id
+        description: Foreign key to dim_products.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+
+      - name: seller_id
+        description: Foreign key to dim_sellers.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_id
+
+      - name: shipping_limit_at
+        description: Deadline by which the seller must hand the item to the carrier.
+        tests:
+          - not_null
+
+      - name: price
+        description: Item price in Brazilian Reais (BRL), excluding freight.
+        tests:
+          - not_null
+
+      - name: freight_value
+        description: Freight cost in BRL for this item.
+        tests:
+          - not_null
+
+      - name: total_item_value
+        description: price + freight_value. Total cost of this line item in BRL.
+        tests:
+          - not_null
+
+      - name: category_name
+        description: English product category from dim_products. Null if product has no category in source.
+
+      - name: seller_city
+        description: Seller city from dim_sellers. Used for regional seller performance analysis.
+
+      - name: seller_state
+        description: Seller 2-letter Brazilian state code from dim_sellers.
+
+  # ---------------------------------------------------------------------------
+  - name: mart_customer_summary
+    description: >
+      One row per real customer. Pre-aggregated purchase behavior summary
+      across the full dataset period (2016-2018). Answers: who are the most
+      valuable customers, what is the repeat purchase rate, how satisfied are
+      customers, and how reliable is delivery per customer.
+    columns:
+      - name: customer_id
+        description: Primary key. Foreign key to dim_customers.
+        tests:
+          - unique
+          - not_null
+
+      - name: total_orders
+        description: Total number of orders placed by this customer in the dataset period.
+        tests:
+          - not_null
+
+      - name: total_spend
+        description: Total amount spent in Brazilian Reais (BRL) across all orders.
+        tests:
+          - not_null
+
+      - name: avg_order_value
+        description: Average order value in BRL.
+        tests:
+          - not_null
+
+      - name: first_order_at
+        description: Timestamp of the customer's first order in the dataset period.
+        tests:
+          - not_null
+
+      - name: last_order_at
+        description: Timestamp of the customer's most recent order in the dataset period.
+        tests:
+          - not_null
+
+      - name: avg_review_score
+        description: Average satisfaction score across all reviewed orders. Excludes orders with no review or ambiguous review mapping.
+
+      - name: on_time_delivery_rate
+        description: >
+          Share of orders delivered on or before the estimated delivery date.
+          Calculated only over orders with valid delivery data (is_valid_delivery IS NOT NULL).
+          NULL if customer has no completed deliveries.
+
+      - name: is_repeat_customer
+        description: TRUE if the customer placed more than one order.
+        tests:
+          - not_null
+
+  # ---------------------------------------------------------------------------
+  - name: mart_seller_performance
+    description: >
+      One row per seller. Pre-aggregated sales, delivery, and customer
+      satisfaction metrics across the full dataset period (2016-2018).
+      Answers: which sellers generate the most revenue, deliver fastest,
+      and have the highest customer satisfaction.
+    columns:
+      - name: seller_id
+        description: Primary key. Foreign key to dim_sellers.
+        tests:
+          - unique
+          - not_null
+
+      - name: city
+        description: Seller city from dim_sellers.
+
+      - name: state
+        description: Seller 2-letter Brazilian state code from dim_sellers.
+
+      - name: total_orders
+        description: Total distinct orders fulfilled by this seller.
+        tests:
+          - not_null
+
+      - name: total_items_sold
+        description: Total items sold across all orders.
+        tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue in Brazilian Reais (BRL), excluding freight.
+        tests:
+          - not_null
+
+      - name: avg_item_price
+        description: Average item price in BRL across all items sold.
+        tests:
+          - not_null
+
+      - name: total_freight_charged
+        description: Total freight collected in BRL across all items.
+        tests:
+          - not_null
+
+      - name: avg_delivery_time_days
+        description: Average days from purchase to delivery. Includes only delivered orders.
+
+      - name: on_time_delivery_rate
+        description: >
+          Share of orders delivered on or before the estimated delivery date.
+          Calculated only over orders with valid delivery data. NULL if seller
+          has no completed deliveries.
+
+      - name: avg_review_score
+        description: Average customer satisfaction score. Excludes orders with no review or ambiguous review mapping.
+
+      - name: distinct_categories
+        description: Number of distinct product categories sold by this seller.
+        tests:
+          - not_null

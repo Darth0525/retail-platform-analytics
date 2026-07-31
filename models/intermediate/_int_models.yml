@@ -1,0 +1,224 @@
+version: 2
+
+# _int_models.yml
+# ---------------
+# Documents all intermediate models with column descriptions and data quality tests.
+#
+# Intermediate models sit between staging and marts. Their purpose:
+#   - Deduplicate source data quality issues identified in staging
+#   - Add business logic flags for known dirty data
+#   - Aggregate and join staging models to prepare for marts
+#
+# Tests here focus on validating that transformations produced correct output:
+#   - Deduplication produced unique primary keys
+#   - Derived flags are not null
+#   - Aggregated values are not null
+
+models:
+
+  # ---------------------------------------------------------------------------
+  - name: int_orders
+    description: >
+      Extends stg_orders with a delivery sequence validity flag. One row per order.
+      Adds is_valid_delivery to identify the 23 known orders where
+      delivered_to_customer_at precedes delivered_to_carrier_at in source data.
+    columns:
+      - name: order_id
+        description: Primary key. Inherited from stg_orders.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: Foreign key to stg_customers. Inherited from stg_orders.
+        tests:
+          - not_null
+
+      - name: status
+        description: Current lifecycle status of the order. Inherited from stg_orders.
+        tests:
+          - not_null
+
+      - name: purchased_at
+        description: Timestamp when the customer placed the order. Inherited from stg_orders.
+        tests:
+          - not_null
+
+      - name: approved_at
+        description: Timestamp when payment was approved. Can be null. Inherited from stg_orders.
+
+      - name: delivered_to_carrier_at
+        description: Timestamp when order was handed to carrier. Can be null. Inherited from stg_orders.
+
+      - name: delivered_to_customer_at
+        description: Timestamp when customer received order. Can be null. Inherited from stg_orders.
+
+      - name: estimated_delivery_date
+        description: Estimated delivery date shown to customer at purchase time. Inherited from stg_orders.
+        tests:
+          - not_null
+
+      - name: is_valid_delivery
+        description: >
+          Boolean flag for delivery sequence validity.
+          TRUE  — both timestamps present and delivered_to_customer_at >= delivered_to_carrier_at.
+          FALSE — both timestamps present but sequence is wrong (23 known dirty rows in source).
+          NULL  — one or both timestamps missing (order not yet delivered).
+
+  # ---------------------------------------------------------------------------
+  - name: int_order_reviews
+    description: >
+      Deduplicates stg_order_reviews on review_id. One row per review.
+      Source data had 789 review_ids appearing on more than one order (1.42% of orders).
+      One row is kept per review_id using QUALIFY ROW_NUMBER() ordered by order_id.
+      The is_duplicate_review flag marks reviews that had ambiguous order association.
+    columns:
+      - name: review_id
+        description: >
+          Primary key. Unique after deduplication — guaranteed one row per review_id.
+          In stg_order_reviews, 789 review_ids appeared on multiple orders.
+        tests:
+          - unique
+          - not_null
+
+      - name: order_id
+        description: >
+          Foreign key to stg_orders. For deduplicated rows, this is the order_id
+          that was kept arbitrarily (alphabetical). May not be the "true" order
+          for reviews flagged with is_duplicate_review = TRUE.
+        tests:
+          - not_null
+
+      - name: score
+        description: Customer satisfaction score from 1 (worst) to 5 (best).
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+
+      - name: comment_title
+        description: Optional short title for the review. Commonly null.
+
+      - name: comment_message
+        description: Optional free-text review message. Commonly null.
+
+      - name: created_at
+        description: Timestamp when the review survey was sent to the customer.
+        tests:
+          - not_null
+
+      - name: answered_at
+        description: Timestamp when the customer submitted the review.
+        tests:
+          - not_null
+
+      - name: is_duplicate_review
+        description: >
+          TRUE if this review_id appeared on more than one order in stg_order_reviews.
+          The order_id retained is arbitrary. Use with caution for order-level review joins.
+          FALSE if review_id was unique in source — no ambiguity.
+        tests:
+          - not_null
+
+  # ---------------------------------------------------------------------------
+  - name: int_order_payments
+    description: >
+      Aggregates stg_order_payments from one row per payment method to one row per order.
+      Joins to stg_order_items to validate payment totals against item prices + freight.
+      Surfaces four data quality issues as boolean flags for downstream use:
+        1. not_defined payment type (3 orders)
+        2. Incomplete payment sequences — missing or gap in sequential values (80 orders)
+        3. Payment value mismatch vs item totals (576 orders, 0.58%)
+        4. payment_installments = 0 on 2 credit_card rows — treated as 1
+    columns:
+      - name: order_id
+        description: Primary key. One row per order after aggregation.
+        tests:
+          - unique
+          - not_null
+
+      - name: primary_payment_type
+        description: >
+          Payment type with the highest payment_value for this order.
+          More reliable than payment_sequential = 1 since 80 orders are missing that row.
+          Ties between equal payment values broken arbitrarily by Snowflake.
+        tests:
+          - not_null
+
+      - name: payment_types
+        description: Array of all payment types used on this order. Includes all methods for split payments.
+        tests:
+          - not_null
+
+      - name: installments
+        description: >
+          MAX payment_installments across all payment rows for this order.
+          Only meaningful for credit_card payments — all other types always have 1.
+          Values of 0 treated as 1 via GREATEST to handle 2 known dirty rows.
+        tests:
+          - not_null
+
+      - name: total_payment_value
+        description: >
+          Total amount paid in Brazilian Reais (BRL), summed across all payment methods.
+          May be understated for the 80 orders with has_incomplete_payment_sequence = TRUE.
+        tests:
+          - not_null
+
+      - name: payment_method_count
+        description: >
+          Number of distinct payment methods used on this order.
+          May be understated for orders with has_incomplete_payment_sequence = TRUE.
+        tests:
+          - not_null
+
+      - name: has_not_defined_payment
+        description: TRUE if any payment row for this order has payment_type = 'not_defined'.
+        tests:
+          - not_null
+
+      - name: has_incomplete_payment_sequence
+        description: >
+          TRUE if MAX(payment_sequential) != COUNT(*) for this order.
+          Catches both a missing first row (sequence starts at 2) and mid-sequence gaps (1, 3, 4).
+          80 orders affected. total_payment_value and payment_method_count are understated for these.
+        tests:
+          - not_null
+
+      - name: has_payment_value_mismatch
+        description: >
+          TRUE if total_payment_value does not match sum of item prices + freight from stg_order_items.
+          576 orders affected (0.58%). Likely caused by missing payment rows or recording errors.
+          NULL if order not found in stg_order_items.
+
+      - name: payment_value_gap
+        description: >
+          Difference between item total (price + freight) and total_payment_value in BRL.
+          Positive = customer underpaid vs item total. Negative = customer overpaid.
+          NULL if order not found in stg_order_items.
+
+  # ---------------------------------------------------------------------------
+  - name: int_geolocation_by_zip
+    description: >
+      Deduplicates stg_geolocation from 1,000,163 rows to 19,015 rows — one per zip_code_prefix.
+      Raw geolocation data contains multiple coordinate entries per zip code because Olist
+      recorded exact GPS delivery points rather than zip-level centroids. Coordinates are
+      excluded as they are delivery-event-level data, not meaningful zip-level geography.
+      City and state are derived using MODE() to handle spelling variations in source data.
+    columns:
+      - name: zip_code_prefix
+        description: Primary key. 5-digit Brazilian zip code prefix. Unique after deduplication.
+        tests:
+          - unique
+          - not_null
+
+      - name: city
+        description: Most frequent city name for this zip code prefix across all source rows. Handles spelling variations.
+        tests:
+          - not_null
+
+      - name: state
+        description: Most frequent 2-letter Brazilian state code for this zip code prefix.
+        tests:
+          - not_null
