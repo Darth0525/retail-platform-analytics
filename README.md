@@ -1,6 +1,6 @@
 # Retail Platform Analytics
 
-An analytics engineering project built on the [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) (~100k orders, 2016–2018). Demonstrates dbt + Snowflake best practices across a static historical dataset — layered transformations, data quality testing, and analytics-ready mart tables in a dev environment.
+An analytics engineering project built on the [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) (~100k orders, 2016–2018). Demonstrates dbt + Snowflake best practices across a static historical dataset — layered transformations, data quality testing, and analytics-ready mart tables in a dev environment — plus a set of [analysis notebooks](#analysis) that turn the marts into business findings.
 
 **Interactive dbt docs:** [https://darth0525.github.io/retail-platform-analytics](https://darth0525.github.io/retail-platform-analytics)
 
@@ -120,6 +120,22 @@ The [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr
 
 ---
 
+## Analysis
+
+Five Jupyter notebooks in [`analysis/`](analysis/) query the marts directly and present findings with charts rendered inline. Start with the executive summary, then dive into any theme. Trend charts use the reliable **Jan 2017 – Aug 2018** window (the edge months are data ramp-in/cutoff, not real demand).
+
+| Notebook | Question it answers | Headline finding |
+|---|---|---|
+| [`00_executive_summary`](analysis/00_executive_summary.ipynb) | What does a stakeholder need to know? | ~100k orders / R$16M over two years; growth maturing; on-time delivery is the satisfaction lever |
+| [`01_exploratory_analysis`](analysis/01_exploratory_analysis.ipynb) | What patterns are in the data? | Broad EDA — growth + Black Friday, São Paulo ≈ 42% of orders, ~3% repeat customers; ends with an analysis backlog |
+| [`02_delivery_and_satisfaction`](analysis/02_delivery_and_satisfaction.ipynb) | What drives review scores? | On-time orders average **4.30★** vs **2.57★** for late — robust after controlling for distance, weight, and category |
+| [`03_customer_segmentation_rfm`](analysis/03_customer_segmentation_rfm.ipynb) | Who are the customers? | ~97% buy once, so RFM's frequency axis collapses; Champions + At-risk high-value ≈ 60% of revenue |
+| [`04_category_and_freight_economics`](analysis/04_category_and_freight_economics.ipynb) | Where does margin leak? | Freight runs ≈ 8–29% of price by category; bulky and cheap-and-light categories carry the drag |
+
+Each notebook opens with a **data caveats** section and reads from the marts via the `analysis/db.py` helper (Snowflake credentials from `.env`).
+
+---
+
 ## Data Quality Findings
 
 One of the key outcomes of this project was a thorough audit of source data quality. All issues are documented in staging tests (`severity: warn`) and handled in the intermediate layer.
@@ -142,6 +158,9 @@ One of the key outcomes of this project was a thorough audit of source data qual
 
 ```
 retail-platform-analytics/
+├── analysis/                     # 5 analysis notebooks (00 summary → 04 deep-dives)
+│   ├── db.py                     # Snowflake connection helper for notebooks
+│   └── NN_*.ipynb                # 00 executive summary, 01–04 deep-dives
 ├── models/
 │   ├── staging/
 │   │   ├── _sources.yml          # Raw table registration
